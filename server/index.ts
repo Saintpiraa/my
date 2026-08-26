@@ -898,7 +898,10 @@ app.use(
   },
 );
 
-if (process.env.NODE_ENV !== "test") {
+if (
+  process.env.VERCEL !== "1" &&
+  process.env.NODE_ENV !== "test"
+) {
   const host = process.env.HOST ?? "0.0.0.0";
 
   app.listen(port, host, () => {
