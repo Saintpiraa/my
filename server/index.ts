@@ -264,10 +264,22 @@ function readAdminSession(request: Request): AdminSession | null {
   }
 }
 
-function setAdminCookie(response: Response, token: string): void {
-  const isProduction = process.env.NODE_ENV === "production";
-  const sameSite = isProduction ? "None" : "Lax";
-  const secure = isProduction ? "; Secure" : "";
+function requestUsesHttps(request: Request): boolean {
+  const forwardedProto = request.headers["x-forwarded-proto"];
+  const protocol = Array.isArray(forwardedProto)
+    ? forwardedProto[0]
+    : forwardedProto;
+
+  return request.protocol === "https" || protocol === "https";
+}
+
+function setAdminCookie(
+  request: Request,
+  response: Response,
+  token: string,
+): void {
+  const secure = requestUsesHttps(request) ? "; Secure" : "";
+  const sameSite = secure ? "None" : "Lax";
 
   response.setHeader(
     "Set-Cookie",
@@ -275,10 +287,9 @@ function setAdminCookie(response: Response, token: string): void {
   );
 }
 
-function clearAdminCookie(response: Response): void {
-  const isProduction = process.env.NODE_ENV === "production";
-  const sameSite = isProduction ? "None" : "Lax";
-  const secure = isProduction ? "; Secure" : "";
+function clearAdminCookie(request: Request, response: Response): void {
+  const secure = requestUsesHttps(request) ? "; Secure" : "";
+  const sameSite = secure ? "None" : "Lax";
 
   response.setHeader(
     "Set-Cookie",
@@ -491,6 +502,7 @@ app.post("/api/admin/login", async (request, response, next) => {
     }
 
     setAdminCookie(
+      request,
       response,
       createAdminSession(config.username, config.sessionSecret),
     );
@@ -501,7 +513,7 @@ app.post("/api/admin/login", async (request, response, next) => {
 });
 
 app.post("/api/admin/logout", (request, response) => {
-  clearAdminCookie(response);
+  clearAdminCookie(request, response);
   response.json({ ok: true });
 });
 
