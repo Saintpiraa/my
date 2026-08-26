@@ -265,17 +265,24 @@ function readAdminSession(request: Request): AdminSession | null {
 }
 
 function setAdminCookie(response: Response, token: string): void {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  const isProduction = process.env.NODE_ENV === "production";
+  const sameSite = isProduction ? "None" : "Lax";
+  const secure = isProduction ? "; Secure" : "";
+
   response.setHeader(
     "Set-Cookie",
-    `${ADMIN_COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${ADMIN_SESSION_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax${secure}`,
+    `${ADMIN_COOKIE_NAME}=${encodeURIComponent(token)}; Max-Age=${ADMIN_SESSION_TTL_SECONDS}; Path=/; HttpOnly; SameSite=${sameSite}${secure}`,
   );
 }
 
 function clearAdminCookie(response: Response): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  const sameSite = isProduction ? "None" : "Lax";
+  const secure = isProduction ? "; Secure" : "";
+
   response.setHeader(
     "Set-Cookie",
-    `${ADMIN_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax`,
+    `${ADMIN_COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=${sameSite}${secure}`,
   );
 }
 
