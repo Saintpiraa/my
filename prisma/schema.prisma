@@ -1,0 +1,193 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ==========================================
+// CUSTOMER
+// ==========================================
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String
+  email     String?
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orders Order[]
+
+  @@index([phone])
+  @@index([email])
+}
+
+// ==========================================
+// PORK CUT / PRODUCT
+// ==========================================
+
+model PorkCut {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  category    String?
+  image       String?
+
+  // Selling price per KG
+  pricePerKg Float
+
+  // Internal cost per KG.
+  // Customers will NEVER see this.
+  costPerKg Float @default(0)
+
+  // Inventory
+  availableKg Float @default(0)
+
+  isActive   Boolean  @default(true)
+  isFeatured Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([isActive])
+  @@index([category])
+}
+
+// ==========================================
+// ORDER
+// ==========================================
+
+model Order {
+  id          String      @id @default(cuid())
+  orderNumber String      @unique
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id])
+
+  status OrderStatus @default(PENDING)
+
+  subtotal Float
+  deliveryFee Float @default(0)
+  total     Float
+
+  customerNote String?
+
+  deliveryAddress String?
+  deliveryPhone   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items   OrderItem[]
+  payment Payment?
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// ==========================================
+// ORDER ITEMS
+// ==========================================
+
+model OrderItem {
+  id String @id @default(cuid())
+
+  orderId String
+  order   Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  porkCutId String
+  porkCut   PorkCut @relation(fields: [porkCutId], references: [id])
+
+  // Quantity of this cut
+  quantity Int @default(1)
+
+  // KG ordered per quantity
+  kilograms Float
+
+  // Price at the exact moment of purchase
+  // This protects old orders if the price changes later.
+  pricePerKg Float
+
+  // Internal cost at the time of sale.
+  // Used to calculate profit.
+  costPerKg Float
+
+  subtotal Float
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([porkCutId])
+}
+
+// ==========================================
+// PAYMENT
+// ==========================================
+
+model Payment {
+  id String @id @default(cuid())
+
+  orderId String @unique
+  order   Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  method PaymentMethod
+  status PaymentStatus @default(PENDING)
+
+  amount Float
+
+  // M-Pesa transaction information
+  mpesaReceiptNumber String?
+  mpesaPhoneNumber   String?
+  mpesaRequestId     String?
+
+  paidAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([mpesaReceiptNumber])
+}
+
+// ==========================================
+// ORDER STATUS
+// ==========================================
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  READY
+  OUT_FOR_DELIVERY
+  COMPLETED
+  CANCELLED
+}
+
+// ==========================================
+// PAYMENT METHOD
+// ==========================================
+
+enum PaymentMethod {
+  MPESA
+  CASH
+}
+
+// ==========================================
+// PAYMENT STATUS
+// ==========================================
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+  REFUNDED
+}
