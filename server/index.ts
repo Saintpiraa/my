@@ -82,6 +82,22 @@ function requireNonEmptyString(value: unknown, fieldName: string): string {
   return value.trim();
 }
 
+function optionalString(
+  value: unknown,
+  fieldName: string,
+): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiError(400, `${fieldName} must be a string`);
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue.length === 0 ? undefined : trimmedValue;
+}
+
 function requirePositiveNumber(value: unknown, fieldName: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     throw new ApiError(400, `${fieldName} must be a positive number`);
@@ -152,14 +168,8 @@ function parseCreateOrderInput(body: unknown): CreateOrderInput {
       body.deliveryLocation,
       "deliveryLocation",
     ),
-    orderNote:
-      body.orderNote === undefined || body.orderNote === null
-        ? undefined
-        : requireNonEmptyString(body.orderNote, "orderNote"),
-    email:
-      body.email === undefined || body.email === null
-        ? undefined
-        : requireNonEmptyString(body.email, "email"),
+    orderNote: optionalString(body.orderNote, "orderNote"),
+    email: optionalString(body.email, "email"),
     items,
     deliveryFee,
     paymentMethod,
