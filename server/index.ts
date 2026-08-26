@@ -14,14 +14,25 @@ import { prisma } from "./prisma.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
-const frontendOrigin =
-  process.env.FRONTEND_ORIGIN ?? "http://localhost:5173";
+const frontendOrigins = new Set(
+  (process.env.FRONTEND_ORIGIN ?? "http://localhost:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
 const ADMIN_COOKIE_NAME = "taviv_admin_session";
 const ADMIN_SESSION_TTL_SECONDS = 60 * 60 * 8;
 
 app.use(
   cors({
-    origin: frontendOrigin,
+    origin(origin, callback) {
+      if (!origin || frontendOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("Origin is not allowed by CORS"));
+    },
     credentials: true,
   }),
 );
