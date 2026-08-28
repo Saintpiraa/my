@@ -332,6 +332,282 @@ function requireAdmin(
   next();
 }
 
+type DarajaConfig = {
+  baseUrl: string;
+  consumerKey: string;
+  consumerSecret: string;
+  shortcode: string;
+  passkey: string;
+  transactionType: "CustomerPayBillOnline" | "CustomerBuyGoodsOnline";
+  callbackUrl: string;
+};
+
+type DarajaStkResponse = {
+  MerchantRequestID?: string;
+  CheckoutRequestID?: string;
+  ResponseCode?: string | number;
+  ResponseDescription?: string;
+  CustomerMessage?: string;
+};
+
+type DarajaCallback = {
+  Body?: {
+    stkCallback?: Record<string, unknown>;
+  };
+};
+
+function getDarajaConfig(): DarajaConfig {
+  const environment = process.env.DARAJA_ENV ?? "sandbox";
+  if (environment !== "sandbox" && environment !== "production") {
+    throw new ApiError(
+      500,
+      "DARAJA_ENV must be sandbox or production",
+    );
+  }
+
+  const consumerKey = process.env.DARAJA_CONSUMER_KEY;
+  const consumerSecret = process.env.DARAJA_CONSUMER_SECRET;
+  const shortcode = process.env.DARAJA_SHORTCODE;
+  const passkey = process.env.DARAJA_PASSKEY;
+  const callbackUrl = process.env.DARAJA_CALLBACK_URL;
+  const transactionType =
+    process.env.DARAJA_TRANSACTION_TYPE ?? "CustomerPayBillOnline";
+
+  if (
+    !consumerKey ||
+    !consumerSecret ||
+    !shortcode ||
+    !passkey ||
+    !callbackUrl
+  ) {
+    throw new ApiError(
+      503,
+      "M-Pesa Sandbox payment integration is not configured on the server",
+    );
+  }
+
+  if (
+    transactionType !== "CustomerPayBillOnline" &&
+    transactionType !== "CustomerBuyGoodsOnline"
+  ) {
+    throw new ApiError(
+      500,
+      "DARAJA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline",
+    );
+  }
+
+  return {
+    baseUrl:
+      process.env.DARAJA_BASE_URL ??
+      (environment === "production"
+        ? "https://api.safaricom.co.ke"
+        : "https://sandbox.safaricom.co.ke"),
+    consumerKey,
+    consumerSecret,
+    shortcode,
+    passkey,
+    transactionType,
+    callbackUrl,
+  };
+}
+
+function normalizeKenyanPhone(value: string): string {
+  const digits = value.replace(/[^0-9]/g, "");
+  const normalized =
+    digits.length === 10 && digits.startsWith("0")
+      ? `254${digits.slice(1)}`
+      : digits;
+
+  if (!/^254[17][0-9]{8}$/.test(normalized)) {
+    throw new ApiError(
+      400,
+      "phoneNumber must be a Kenyan mobile number, for example 0712345678",
+    );
+  }
+
+  return normalized;
+}
+
+function darajaTimestamp(date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Africa/Nairobi",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  const valueFor = (type: string) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+
+  return [
+    valueFor("year"),
+    valueFor("month"),
+    valueFor("day"),
+    valueFor("hour"),
+    valueFor("minute"),
+    valueFor("second"),
+  ].join("");
+}
+
+async function getDarajaAccessToken(config: DarajaConfig): Promise<string> {
+  const basicCredentials = Buffer.from(
+    `${config.consumerKey}:${config.consumerSecret}`,
+  ).toString("base64");
+  const tokenResponse = await fetch(
+    `${config.baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
+    {
+      headers: {
+        Authorization: `Basic ${basicCredentials}`,
+        Accept: "application/json",
+      },
+    },
+  );
+  const tokenBody = (await tokenResponse.json().catch(() => ({}))) as {
+    access_token?: string;
+  };
+
+  if (!tokenResponse.ok || !tokenBody.access_token) {
+    throw new ApiError(502, "Daraja authorization failed");
+  }
+
+  return tokenBody.access_token;
+}
+
+async function initiateDarajaStkPush(input: {
+  config: DarajaConfig;
+  phoneNumber: string;
+  amount: number;
+  orderNumber: string;
+}): Promise<{
+  checkoutRequestId: string;
+  merchantRequestId?: string;
+  customerMessage: string;
+  phoneNumber: string;
+}> {
+  const phoneNumber = normalizeKenyanPhone(input.phoneNumber);
+  const amount = Math.max(1, Math.round(input.amount));
+  const timestamp = darajaTimestamp();
+  const password = Buffer.from(
+    `${input.config.shortcode}${input.config.passkey}${timestamp}`,
+  ).toString("base64");
+  const accountReference = input.orderNumber
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .slice(0, 12);
+  const accessToken = await getDarajaAccessToken(input.config);
+
+  const stkResponse = await fetch(
+    `${input.config.baseUrl}/mpesa/stkpush/v1/processrequest`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        BusinessShortCode: input.config.shortcode,
+        Password: password,
+        Timestamp: timestamp,
+        TransactionType: input.config.transactionType,
+        Amount: amount,
+        PartyA: phoneNumber,
+        PartyB: input.config.shortcode,
+        PhoneNumber: phoneNumber,
+        CallBackURL: input.config.callbackUrl,
+        AccountReference: accountReference,
+        TransactionDesc: "Taviv order",
+      }),
+    },
+  );
+  const responseBody = (await stkResponse.json().catch(() => ({}))) as DarajaStkResponse;
+
+  if (
+    !stkResponse.ok ||
+    String(responseBody.ResponseCode) !== "0" ||
+    !responseBody.CheckoutRequestID
+  ) {
+    throw new ApiError(502, "Daraja did not accept the payment request");
+  }
+
+  return {
+    checkoutRequestId: responseBody.CheckoutRequestID,
+    merchantRequestId: responseBody.MerchantRequestID,
+    customerMessage:
+      responseBody.CustomerMessage ??
+      "Payment request sent. Check your phone and enter your M-Pesa PIN.",
+    phoneNumber,
+  };
+}
+
+function callbackMetadataValue(
+  callback: Record<string, unknown>,
+  name: string,
+): string | number | undefined {
+  const metadata = callback.CallbackMetadata;
+  if (!isRecord(metadata) || !Array.isArray(metadata.Item)) {
+    return undefined;
+  }
+
+  const matchingItem = metadata.Item.find(
+    (item) => isRecord(item) && item.Name === name,
+  );
+
+  if (!isRecord(matchingItem)) {
+    return undefined;
+  }
+
+  return typeof matchingItem.Value === "string" ||
+    typeof matchingItem.Value === "number"
+    ? matchingItem.Value
+    : undefined;
+}
+
+async function failPaymentAndReleaseStock(orderId: string): Promise<void> {
+  await prisma.$transaction(async (transaction) => {
+    const order = await transaction.order.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        status: true,
+        payment: { select: { status: true } },
+        items: { select: { porkCutId: true, kilograms: true } },
+      },
+    });
+
+    if (
+      !order ||
+      !order.payment ||
+      (order.payment.status !== "PENDING" &&
+        order.payment.status !== "PROCESSING")
+    ) {
+      return;
+    }
+
+    await transaction.payment.update({
+      where: { orderId: order.id },
+      data: { status: "FAILED" },
+    });
+
+    if (order.status !== "CANCELLED") {
+      await transaction.order.update({
+        where: { id: order.id },
+        data: { status: "CANCELLED" },
+      });
+    }
+
+    for (const item of order.items) {
+      await transaction.porkCut.update({
+        where: { id: item.porkCutId },
+        data: { availableKg: { increment: item.kilograms } },
+      });
+    }
+  });
+}
+
 app.get("/api/health", async (_request, response, next) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
@@ -462,6 +738,7 @@ app.post("/api/orders", async (request, response, next) => {
           },
         },
         select: {
+          id: true,
           orderNumber: true,
           status: true,
           subtotal: true,
@@ -493,11 +770,186 @@ app.post("/api/orders", async (request, response, next) => {
       return createdOrder;
     });
 
-    response.status(201).json(order);
+    if (input.paymentMethod === "MPESA") {
+      try {
+        const stkPush = await initiateDarajaStkPush({
+          config: getDarajaConfig(),
+          phoneNumber: input.phoneNumber,
+          amount: order.total,
+          orderNumber: order.orderNumber,
+        });
+
+        await prisma.payment.update({
+          where: { orderId: order.id },
+          data: {
+            status: "PROCESSING",
+            mpesaPhoneNumber: stkPush.phoneNumber,
+            mpesaRequestId: stkPush.checkoutRequestId,
+          },
+        });
+
+        response.status(201).json({
+          orderNumber: order.orderNumber,
+          status: order.status,
+          subtotal: order.subtotal,
+          deliveryFee: order.deliveryFee,
+          total: order.total,
+          paymentStatus: "PROCESSING",
+          paymentMessage: stkPush.customerMessage,
+        });
+        return;
+      } catch (error) {
+        await failPaymentAndReleaseStock(order.id);
+        throw error;
+      }
+    }
+
+    response.status(201).json({
+      orderNumber: order.orderNumber,
+      status: order.status,
+      subtotal: order.subtotal,
+      deliveryFee: order.deliveryFee,
+      total: order.total,
+      paymentStatus: "PENDING",
+    });
   } catch (error) {
     next(error);
   }
 });
+
+app.get(
+  "/api/orders/:orderNumber/payment",
+  async (request, response, next) => {
+    try {
+      const orderNumber = Array.isArray(request.params.orderNumber)
+        ? request.params.orderNumber[0]
+        : request.params.orderNumber;
+
+      if (!orderNumber) {
+        throw new ApiError(400, "Order number is required");
+      }
+
+      const order = await prisma.order.findUnique({
+        where: { orderNumber },
+        select: {
+          orderNumber: true,
+          status: true,
+          payment: {
+            select: {
+              status: true,
+              amount: true,
+              mpesaReceiptNumber: true,
+              mpesaPhoneNumber: true,
+            },
+          },
+        },
+      });
+
+      if (!order) {
+        throw new ApiError(404, "Order not found");
+      }
+
+      response.json({
+        orderNumber: order.orderNumber,
+        orderStatus: order.status,
+        paymentStatus: order.payment?.status ?? "PENDING",
+        amount: order.payment?.amount ?? 0,
+        mpesaReceiptNumber: order.payment?.mpesaReceiptNumber ?? null,
+        mpesaPhoneNumber: order.payment?.mpesaPhoneNumber ?? null,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/payments/daraja/callback",
+  async (request, response, next) => {
+    try {
+      const payload = request.body as DarajaCallback;
+      const callback = payload.Body?.stkCallback;
+      const checkoutRequestId =
+        typeof callback?.CheckoutRequestID === "string"
+          ? callback.CheckoutRequestID
+          : undefined;
+      const resultCode =
+        typeof callback?.ResultCode === "number"
+          ? callback.ResultCode
+          : Number(callback?.ResultCode);
+
+      if (!callback || !checkoutRequestId || !Number.isFinite(resultCode)) {
+        response.json({ ResultCode: 0, ResultDesc: "Accepted" });
+        return;
+      }
+
+      const payment = await prisma.payment.findFirst({
+        where: { mpesaRequestId: checkoutRequestId },
+        select: {
+          id: true,
+          orderId: true,
+          status: true,
+        },
+      });
+
+      if (!payment) {
+        response.json({ ResultCode: 0, ResultDesc: "Accepted" });
+        return;
+      }
+
+      if (payment.status !== "PENDING" && payment.status !== "PROCESSING") {
+        response.json({ ResultCode: 0, ResultDesc: "Already processed" });
+        return;
+      }
+
+      if (resultCode === 0) {
+        const receiptNumber = callbackMetadataValue(
+          callback,
+          "MpesaReceiptNumber",
+        );
+        const phoneNumber = callbackMetadataValue(callback, "PhoneNumber");
+
+        await prisma.$transaction(async (transaction) => {
+          const currentPayment = await transaction.payment.findUnique({
+            where: { id: payment.id },
+            select: { status: true },
+          });
+
+          if (
+            !currentPayment ||
+            (currentPayment.status !== "PENDING" &&
+              currentPayment.status !== "PROCESSING")
+          ) {
+            return;
+          }
+
+          await transaction.payment.update({
+            where: { id: payment.id },
+            data: {
+              status: "PAID",
+              mpesaReceiptNumber:
+                receiptNumber === undefined ? undefined : String(receiptNumber),
+              mpesaPhoneNumber:
+                phoneNumber === undefined ? undefined : String(phoneNumber),
+              paidAt: new Date(),
+            },
+          });
+
+          await transaction.order.update({
+            where: { id: payment.orderId },
+            data: { status: "CONFIRMED" },
+          });
+        });
+      } else {
+        await failPaymentAndReleaseStock(payment.orderId);
+      }
+
+      response.json({ ResultCode: 0, ResultDesc: "Accepted" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 app.post("/api/admin/login", async (request, response, next) => {
   try {
